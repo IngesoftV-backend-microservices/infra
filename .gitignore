@@ -4,6 +4,7 @@
 *.tfplan
 *.tfvars
 !terraform.tfvars.example
+!**/terraform.tfvars.example
 
 # Terraform directories
 .terraform/
