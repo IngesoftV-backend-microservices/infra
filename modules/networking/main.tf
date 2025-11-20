@@ -3,7 +3,14 @@ resource "azurerm_virtual_network" "main" {
   address_space       = var.address_space
   location            = var.location
   resource_group_name = var.resource_group_name
-  tags                = var.tags
+
+  tags = merge(var.tags, {
+    Name = "${var.vnet_name}-${var.environment}"
+  })
+
+  lifecycle {
+    prevent_destroy = false
+  }
 }
 
 resource "azurerm_subnet" "main" {

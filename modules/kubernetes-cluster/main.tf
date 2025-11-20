@@ -29,7 +29,17 @@ resource "azurerm_kubernetes_cluster" "main" {
     dns_service_ip = "10.1.0.10"
   }
 
-  tags = var.tags
+  tags = merge(var.tags, {
+    Name = "${var.cluster_name}-${var.environment}"
+  })
+
+  lifecycle {
+    prevent_destroy = false
+    ignore_changes = [
+      kubernetes_version,
+      default_node_pool[0].node_count
+    ]
+  }
 }
 
 # Additional node pools

@@ -16,22 +16,38 @@ variable "location" {
 variable "resource_group_name" {
   description = "Resource group name (will have environment suffix)"
   type        = string
+  validation {
+    condition     = length(var.resource_group_name) > 0 && length(var.resource_group_name) <= 90
+    error_message = "Resource group name must be between 1 and 90 characters."
+  }
 }
 
 variable "cluster_name" {
   description = "Kubernetes cluster name (will have environment suffix)"
   type        = string
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$", var.cluster_name))
+    error_message = "Cluster name must be lowercase alphanumeric with hyphens, 1-63 characters."
+  }
 }
 
 variable "dns_prefix" {
   description = "DNS prefix for Kubernetes cluster"
   type        = string
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,52}[a-z0-9]$", var.dns_prefix))
+    error_message = "DNS prefix must be lowercase alphanumeric with hyphens, 1-54 characters."
+  }
 }
 
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.28"
+  default     = "1.32"
+  validation {
+    condition     = can(regex("^1\\.(2[6-9]|[3-9][0-9])$", var.kubernetes_version))
+    error_message = "Kubernetes version must be 1.26 or higher (format: 1.XX)."
+  }
 }
 
 variable "vnet_name" {

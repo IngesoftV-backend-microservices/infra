@@ -11,9 +11,11 @@ NC='\033[0m'
 
 # Backend configuration (match with versions.tf)
 RESOURCE_GROUP="rg-terraform-state"
-STORAGE_ACCOUNT="stterraformstatetaller2"
+STORAGE_ACCOUNT="sttfstatevingesoft"
 CONTAINER_NAME="terraform-state"
 LOCATION="East US"
+
+echo -e "${BLUE}Storage Account name: ${STORAGE_ACCOUNT}${NC}"
 
 echo -e "${BLUE}🚀 Setting up Terraform Backend${NC}"
 echo -e "${BLUE}=============================================${NC}"
@@ -86,4 +88,5 @@ else
 fi
 
 echo -e "${GREEN}🎉 Backend setup complete!${NC}"
+echo -e "${YELLOW}Storage Account: ${STORAGE_ACCOUNT}${NC}"
 echo -e "${BLUE}You can now run: terraform init${NC}"
