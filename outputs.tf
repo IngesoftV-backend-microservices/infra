@@ -34,3 +34,25 @@ output "aks_subnet_id" {
   value       = module.networking.aks_subnet_id
 }
 
+output "acr_name" {
+  description = "Azure Container Registry name"
+  value       = module.acr.name
+}
+
+output "acr_login_server" {
+  description = "Azure Container Registry login server URL"
+  value       = module.acr.login_server
+}
+
+output "acr_admin_username" {
+  description = "ACR admin username"
+  value       = module.acr.admin_username
+  sensitive   = true
+}
+
+output "acr_admin_password" {
+  description = "ACR admin password"
+  value       = module.acr.admin_password
+  sensitive   = true
+}
+
