@@ -30,3 +30,8 @@ output "cluster_id" {
   value       = azurerm_kubernetes_cluster.main.id
 }
 
+output "kubelet_identity" {
+  description = "Kubelet identity for ACR pull role assignment"
+  value       = azurerm_kubernetes_cluster.main.kubelet_identity
+}
+

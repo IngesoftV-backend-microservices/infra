@@ -111,6 +111,27 @@ variable "rbac_enabled" {
   default     = true
 }
 
+variable "acr_name" {
+  description = "Base name for ACR (alphanumeric only, will have environment suffix)"
+  type        = string
+  default     = "acrvingesoft"
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9]+$", var.acr_name))
+    error_message = "ACR name must contain only alphanumeric characters."
+  }
+}
+
+variable "acr_sku" {
+  description = "SKU tier for ACR (Basic, Standard, Premium)"
+  type        = string
+  default     = "Basic"
+}
+
+variable "acr_admin_enabled" {
+  description = "Enable admin user for ACR"
+  type        = bool
+  default     = false
+}
 
 variable "tags" {
   description = "Tags to apply to resources"
