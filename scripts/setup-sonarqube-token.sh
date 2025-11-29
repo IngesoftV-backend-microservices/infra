@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Script to automatically configure SonarQube and update GitHub secret
-# This script should be run after SonarQube is deployed to Kubernetes
+# FIXED: Logs are now sent to stderr to avoid polluting the token variable capture
 
 # Colors for output
 RED='\033[0;31m'
@@ -21,17 +21,17 @@ RETRY_DELAY=10
 GITHUB_ORG="${GITHUB_ORG:-}"
 GITHUB_SECRET_NAME="${GITHUB_SECRET_NAME:-SONAR_TOKEN}"
 
-# Function to print messages
+# Function to print messages (Modified to print to stderr >&2)
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo -e "${GREEN}[INFO]${NC} $1" >&2
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 # Function to get SonarQube service IP
@@ -126,15 +126,17 @@ generate_sonar_token() {
         return 1
     fi
 
-    # Validate token length (SonarQube tokens are typically 40 characters)
+    # Validate token length
     TOKEN_LENGTH=${#TOKEN}
-    if [ $TOKEN_LENGTH -lt 20 ]; then
-        log_error "Token is too short (${TOKEN_LENGTH} characters): $TOKEN"
-        log_error "Expected at least 20 characters. Response: $RESPONSE"
+    # SonarQube tokens are typically 40 chars
+    if [ $TOKEN_LENGTH -lt 20 ] || [ $TOKEN_LENGTH -gt 60 ]; then 
+        log_error "Token length invalid (${TOKEN_LENGTH} chars). Captured data: $TOKEN"
         return 1
     fi
 
     log_info "Token generated successfully! (Length: ${TOKEN_LENGTH} characters)"
+    
+    # IMPORTANTE: Esto es lo único que sale por stdout para ser capturado
     echo "$TOKEN"
     return 0
 }
@@ -147,21 +149,16 @@ update_github_secret() {
 
     log_info "Updating GitHub secret: $secret_name in organization $org"
 
-    # Check if gh CLI is installed
     if ! command -v gh &> /dev/null; then
         log_error "GitHub CLI (gh) is not installed"
-        log_info "Install it from: https://cli.github.com/"
         return 1
     fi
 
-    # Check if gh is authenticated
     if ! gh auth status &> /dev/null; then
         log_error "GitHub CLI is not authenticated"
-        log_info "Run: gh auth login"
         return 1
     fi
 
-    # Update the secret at organization level with visibility=all for public repos
     echo "$secret_value" | gh secret set "$secret_name" --org "$org" --visibility all
 
     if [ $? -eq 0 ]; then
@@ -177,7 +174,6 @@ update_github_secret() {
 main() {
     log_info "=== SonarQube Token Setup Automation ==="
 
-    # Check required tools
     for tool in kubectl jq curl; do
         if ! command -v $tool &> /dev/null; then
             log_error "$tool is required but not installed"
@@ -185,10 +181,8 @@ main() {
         fi
     done
 
-    # Parse arguments
     if [ $# -lt 2 ]; then
         log_error "Usage: $0 <kubernetes-namespace> <github-org> [token-name]"
-        log_error "Example: $0 ecommerce-dev IngesoftV-backend-microservices"
         exit 1
     fi
 
@@ -201,48 +195,26 @@ main() {
 
     log_info "Namespace: $NAMESPACE"
     log_info "GitHub Organization: $GITHUB_ORG"
-    log_info "Token Name: $SONAR_TOKEN_NAME"
 
-    # Step 1: Get SonarQube URL
-    log_info "Step 1: Getting SonarQube URL..."
     SONAR_URL=$(get_sonarqube_url "$NAMESPACE")
-    if [ $? -ne 0 ]; then
-        exit 1
-    fi
+    if [ $? -ne 0 ]; then exit 1; fi
     log_info "SonarQube URL: $SONAR_URL"
 
-    # Step 2: Wait for SonarQube to be ready
-    log_info "Step 2: Waiting for SonarQube to be ready..."
     wait_for_sonarqube "$SONAR_URL"
-    if [ $? -ne 0 ]; then
-        exit 1
-    fi
+    if [ $? -ne 0 ]; then exit 1; fi
 
-    # Step 3: Generate token
-    log_info "Step 3: Generating SonarQube token..."
+    # AQUI ESTABA EL ERROR: Ahora TOKEN capturará solo el token limpio
     TOKEN=$(generate_sonar_token "$SONAR_URL" "$SONAR_TOKEN_NAME")
-    if [ $? -ne 0 ]; then
-        exit 1
-    fi
+    if [ $? -ne 0 ]; then exit 1; fi
 
-    # Step 4: Update GitHub secret
-    log_info "Step 4: Updating GitHub secret..."
     update_github_secret "$GITHUB_ORG" "$GITHUB_SECRET_NAME" "$TOKEN"
     if [ $? -ne 0 ]; then
-        log_warn "Failed to update GitHub secret automatically"
-        log_info "You can manually set the secret with this token:"
-        echo ""
-        echo "$TOKEN"
-        echo ""
-        log_info "Run: echo '$TOKEN' | gh secret set $GITHUB_SECRET_NAME --org $GITHUB_ORG"
+        log_warn "Manual step required. Token: $TOKEN"
         exit 1
     fi
 
     log_info "=== Setup completed successfully! ==="
-    log_info "SonarQube URL: $SONAR_URL"
-    log_info "GitHub secret '$GITHUB_SECRET_NAME' has been updated in organization '$GITHUB_ORG'"
-    log_info "You can now run your CI/CD pipelines with SonarQube analysis"
+    log_info "You can now run your CI/CD pipelines."
 }
 
-# Run main function
 main "$@"
