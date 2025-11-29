@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 # Configuration
 SONAR_ADMIN_USER="${SONAR_ADMIN_USER:-admin}"
 SONAR_ADMIN_PASSWORD="${SONAR_ADMIN_PASSWORD:-admin}"
-SONAR_TOKEN_NAME="${SONAR_TOKEN_NAME:-github-actions-$(date +%Y%m%d)}"
+SONAR_TOKEN_NAME="${SONAR_TOKEN_NAME:-github-actions-$(date +%Y%m%d-%H%M%S)}"
 MAX_RETRIES=30
 RETRY_DELAY=10
 
@@ -91,7 +91,23 @@ generate_sonar_token() {
 
     log_info "Generating SonarQube token: $token_name"
 
-    # Try to generate token using SonarQube 9.9 API
+    # First, revoke all existing github-actions tokens to avoid conflicts
+    log_info "Cleaning up old tokens..."
+    OLD_TOKENS=$(curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
+        "$sonar_url/api/user_tokens/search" | jq -r '.userTokens[] | select(.name | startswith("github-actions")) | .name' 2>/dev/null || echo "")
+
+    if [ -n "$OLD_TOKENS" ]; then
+        while IFS= read -r old_token; do
+            if [ -n "$old_token" ]; then
+                log_info "Revoking old token: $old_token"
+                curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
+                    -X POST "$sonar_url/api/user_tokens/revoke" \
+                    -d "name=$old_token" > /dev/null 2>&1 || true
+            fi
+        done <<< "$OLD_TOKENS"
+    fi
+
+    # Generate new token
     RESPONSE=$(curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
         -X POST "$sonar_url/api/user_tokens/generate" \
         -d "name=$token_name" || echo "")
@@ -99,24 +115,6 @@ generate_sonar_token() {
     if [ -z "$RESPONSE" ]; then
         log_error "Failed to generate token: Empty response"
         return 1
-    fi
-
-    # Check if response contains error
-    ERROR=$(echo "$RESPONSE" | jq -r '.errors[0].msg' 2>/dev/null || echo "")
-    if [ -n "$ERROR" ] && [ "$ERROR" != "null" ]; then
-        # Token might already exist, try to revoke and recreate
-        log_warn "Token might already exist: $ERROR"
-        log_info "Revoking existing token and creating new one..."
-
-        # Revoke existing token
-        curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
-            -X POST "$sonar_url/api/user_tokens/revoke" \
-            -d "name=$token_name" > /dev/null 2>&1 || true
-
-        # Try to generate again
-        RESPONSE=$(curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
-            -X POST "$sonar_url/api/user_tokens/generate" \
-            -d "name=$token_name" || echo "")
     fi
 
     # Extract token from response
@@ -128,7 +126,15 @@ generate_sonar_token() {
         return 1
     fi
 
-    log_info "Token generated successfully!"
+    # Validate token length (SonarQube tokens are typically 40 characters)
+    TOKEN_LENGTH=${#TOKEN}
+    if [ $TOKEN_LENGTH -lt 20 ]; then
+        log_error "Token is too short (${TOKEN_LENGTH} characters): $TOKEN"
+        log_error "Expected at least 20 characters. Response: $RESPONSE"
+        return 1
+    fi
+
+    log_info "Token generated successfully! (Length: ${TOKEN_LENGTH} characters)"
     echo "$TOKEN"
     return 0
 }
@@ -155,8 +161,8 @@ update_github_secret() {
         return 1
     fi
 
-    # Update the secret at organization level
-    echo "$secret_value" | gh secret set "$secret_name" --org "$org"
+    # Update the secret at organization level with visibility=all for public repos
+    echo "$secret_value" | gh secret set "$secret_name" --org "$org" --visibility all
 
     if [ $? -eq 0 ]; then
         log_info "GitHub secret updated successfully!"
