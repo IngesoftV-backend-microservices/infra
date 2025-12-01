@@ -10,7 +10,7 @@ variable "environment" {
 variable "location" {
   description = "Azure region for resources"
   type        = string
-  default     = "East US"
+  default     = "Canada Central"
 }
 
 variable "resource_group_name" {
@@ -101,6 +101,9 @@ variable "additional_node_pools" {
     vm_size         = string
     os_disk_size_gb = number
     max_pods        = number
+    priority        = optional(string, "Regular")  # Regular or Spot
+    eviction_policy = optional(string, "Delete")  # Delete or Deallocate (only for Spot)
+    spot_max_price  = optional(number, null)      # Max price for Spot instances (-1 for on-demand price)
   }))
   default = {}
 }
@@ -114,7 +117,7 @@ variable "rbac_enabled" {
 variable "acr_name" {
   description = "Base name for ACR (alphanumeric only, will have environment suffix)"
   type        = string
-  default     = "acrvingesoft"
+  default     = "acrvingesofttaller2"
   validation {
     condition     = can(regex("^[a-zA-Z0-9]+$", var.acr_name))
     error_message = "ACR name must contain only alphanumeric characters."

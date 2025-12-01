@@ -1,6 +1,6 @@
 # Production Environment Configuration
 environment = "prod"
-location    = "East US"
+location    = "Canada Central"
 
 # Resource naming
 resource_group_name = "rg-ecommerce-microservices"

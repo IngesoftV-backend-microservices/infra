@@ -5,7 +5,7 @@
 environment = "dev"
 
 # Azure region where resources will be created
-location = "East US"
+location = "Canada Central"
 
 # Resource naming
 resource_group_name = "rg-ecommerce-microservices"
