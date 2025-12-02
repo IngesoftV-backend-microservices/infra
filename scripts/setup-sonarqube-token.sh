@@ -1,27 +1,26 @@
 #!/bin/bash
 set -euo pipefail
 
-# Script to automatically configure SonarQube and update GitHub secret
-# FIXED: Logs are now sent to stderr to avoid polluting the token variable capture
+# Script to automatically configure SonarQube tokens for DEV and PROD environments
+# and update GitHub organization secrets
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
 SONAR_ADMIN_USER="${SONAR_ADMIN_USER:-admin}"
-SONAR_ADMIN_PASSWORD="${SONAR_ADMIN_PASSWORD:-admin}"
-SONAR_TOKEN_NAME="${SONAR_TOKEN_NAME:-github-actions-$(date +%Y%m%d-%H%M%S)}"
+SONAR_ADMIN_PASSWORD="${SONAR_ADMIN_PASSWORD:-pass}"
 MAX_RETRIES=30
 RETRY_DELAY=10
 
 # GitHub configuration
-GITHUB_ORG="${GITHUB_ORG:-}"
-GITHUB_SECRET_NAME="${GITHUB_SECRET_NAME:-SONAR_TOKEN}"
+GITHUB_ORG="${GITHUB_ORG:-IngesoftV-backend-microservices}"
 
-# Function to print messages (Modified to print to stderr >&2)
+# Function to print messages (to stderr to avoid polluting token capture)
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1" >&2
 }
@@ -32,6 +31,10 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+log_success() {
+    echo -e "${BLUE}[SUCCESS]${NC} $1" >&2
 }
 
 # Function to get SonarQube service IP
@@ -48,11 +51,11 @@ get_sonarqube_url() {
         fi
 
         retry=$((retry + 1))
-        log_warn "Waiting for SonarQube LoadBalancer IP... (attempt $retry/$MAX_RETRIES)"
+        log_warn "Waiting for SonarQube LoadBalancer IP in $namespace... (attempt $retry/$MAX_RETRIES)"
         sleep $RETRY_DELAY
     done
 
-    log_error "Failed to get SonarQube LoadBalancer IP after $MAX_RETRIES attempts"
+    log_error "Failed to get SonarQube LoadBalancer IP from $namespace after $MAX_RETRIES attempts"
     return 1
 }
 
@@ -70,7 +73,7 @@ wait_for_sonarqube() {
             # Check if SonarQube is actually UP
             STATUS=$(curl -s "$sonar_url/api/system/status" | jq -r '.status' 2>/dev/null || echo "DOWN")
             if [ "$STATUS" == "UP" ]; then
-                log_info "SonarQube is ready!"
+                log_success "SonarQube is ready!"
                 return 0
             fi
         fi
@@ -89,22 +92,18 @@ generate_sonar_token() {
     local sonar_url=$1
     local token_name=$2
 
-    log_info "Generating SonarQube token: $token_name"
+    log_info "Generating SonarQube token: $token_name at $sonar_url"
 
-    # First, revoke all existing github-actions tokens to avoid conflicts
-    log_info "Cleaning up old tokens..."
-    OLD_TOKENS=$(curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
-        "$sonar_url/api/user_tokens/search" | jq -r '.userTokens[] | select(.name | startswith("github-actions")) | .name' 2>/dev/null || echo "")
+    # First, revoke existing token with same name to avoid conflicts
+    log_info "Cleaning up old token with same name if exists..."
+    OLD_TOKEN=$(curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
+        "$sonar_url/api/user_tokens/search" | jq -r ".userTokens[] | select(.name == \"$token_name\") | .name" 2>/dev/null || echo "")
 
-    if [ -n "$OLD_TOKENS" ]; then
-        while IFS= read -r old_token; do
-            if [ -n "$old_token" ]; then
-                log_info "Revoking old token: $old_token"
-                curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
-                    -X POST "$sonar_url/api/user_tokens/revoke" \
-                    -d "name=$old_token" > /dev/null 2>&1 || true
-            fi
-        done <<< "$OLD_TOKENS"
+    if [ -n "$OLD_TOKEN" ]; then
+        log_info "Revoking old token: $OLD_TOKEN"
+        curl -s -u "${SONAR_ADMIN_USER}:${SONAR_ADMIN_PASSWORD}" \
+            -X POST "$sonar_url/api/user_tokens/revoke" \
+            -d "name=$OLD_TOKEN" > /dev/null 2>&1 || true
     fi
 
     # Generate new token
@@ -126,95 +125,179 @@ generate_sonar_token() {
         return 1
     fi
 
-    # Validate token length
+    # Validate token length (SonarQube tokens are typically 40 chars)
     TOKEN_LENGTH=${#TOKEN}
-    # SonarQube tokens are typically 40 chars
-    if [ $TOKEN_LENGTH -lt 20 ] || [ $TOKEN_LENGTH -gt 60 ]; then 
+    if [ $TOKEN_LENGTH -lt 20 ] || [ $TOKEN_LENGTH -gt 60 ]; then
         log_error "Token length invalid (${TOKEN_LENGTH} chars). Captured data: $TOKEN"
         return 1
     fi
 
-    log_info "Token generated successfully! (Length: ${TOKEN_LENGTH} characters)"
-    
-    # IMPORTANTE: Esto es lo único que sale por stdout para ser capturado
+    log_success "Token generated successfully! (Length: ${TOKEN_LENGTH} characters)"
+
+    # Output only the token to stdout (to be captured)
     echo "$TOKEN"
     return 0
 }
 
-# Function to update GitHub secret
+# Function to update GitHub organization secret
 update_github_secret() {
     local org=$1
     local secret_name=$2
     local secret_value=$3
 
-    log_info "Updating GitHub secret: $secret_name in organization $org"
+    log_info "Updating GitHub organization secret: $secret_name"
 
     if ! command -v gh &> /dev/null; then
         log_error "GitHub CLI (gh) is not installed"
+        log_error "Install: https://cli.github.com/"
         return 1
     fi
 
     if ! gh auth status &> /dev/null; then
         log_error "GitHub CLI is not authenticated"
+        log_error "Run: gh auth login"
         return 1
     fi
 
+    # Set secret with visibility 'all' for public repos
     echo "$secret_value" | gh secret set "$secret_name" --org "$org" --visibility all
 
     if [ $? -eq 0 ]; then
-        log_info "GitHub secret updated successfully!"
+        log_success "GitHub secret '$secret_name' updated successfully!"
         return 0
     else
-        log_error "Failed to update GitHub secret"
+        log_error "Failed to update GitHub secret '$secret_name'"
         return 1
     fi
 }
 
+# Function to process one environment
+process_environment() {
+    local env_name=$1
+    local cluster_context=$2
+    local namespace=$3
+    local secret_name=$4
+    local token_name=$5
+
+    log_info "================================"
+    log_info "Processing $env_name environment"
+    log_info "================================"
+
+    # Switch to the correct cluster context
+    log_info "Switching to cluster context: $cluster_context"
+    kubectl config use-context "$cluster_context" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        log_error "Failed to switch to context: $cluster_context"
+        log_error "Available contexts:"
+        kubectl config get-contexts -o name >&2
+        return 1
+    fi
+
+    # Get SonarQube URL
+    SONAR_URL=$(get_sonarqube_url "$namespace")
+    if [ $? -ne 0 ]; then
+        log_error "Failed to get SonarQube URL for $env_name"
+        return 1
+    fi
+    log_info "SonarQube URL: $SONAR_URL"
+
+    # Wait for SonarQube to be ready
+    wait_for_sonarqube "$SONAR_URL"
+    if [ $? -ne 0 ]; then
+        log_error "SonarQube not ready for $env_name"
+        return 1
+    fi
+
+    # Generate token
+    TOKEN=$(generate_sonar_token "$SONAR_URL" "$token_name")
+    if [ $? -ne 0 ]; then
+        log_error "Failed to generate token for $env_name"
+        return 1
+    fi
+
+    # Update GitHub secret
+    update_github_secret "$GITHUB_ORG" "$secret_name" "$TOKEN"
+    if [ $? -ne 0 ]; then
+        log_warn "Failed to update GitHub secret for $env_name"
+        log_warn "Manual step required. Token for $env_name: $TOKEN"
+        return 1
+    fi
+
+    log_success "$env_name environment configured successfully!"
+    return 0
+}
+
 # Main execution
 main() {
-    log_info "=== SonarQube Token Setup Automation ==="
+    echo ""
+    log_info "=========================================="
+    log_info "SonarQube Multi-Environment Token Setup"
+    log_info "=========================================="
+    echo ""
 
-    for tool in kubectl jq curl; do
+    # Check required tools
+    for tool in kubectl jq curl gh; do
         if ! command -v $tool &> /dev/null; then
             log_error "$tool is required but not installed"
             exit 1
         fi
     done
 
-    if [ $# -lt 2 ]; then
-        log_error "Usage: $0 <kubernetes-namespace> <github-org> [token-name]"
+    # Check GitHub CLI authentication
+    if ! gh auth status &> /dev/null; then
+        log_error "GitHub CLI is not authenticated"
+        log_error "Please run: gh auth login"
         exit 1
     fi
 
-    NAMESPACE=$1
-    GITHUB_ORG=$2
-
-    if [ $# -ge 3 ]; then
-        SONAR_TOKEN_NAME=$3
+    # Override GitHub org if provided as argument
+    if [ $# -ge 1 ]; then
+        GITHUB_ORG=$1
+        log_info "Using GitHub Organization: $GITHUB_ORG"
+    else
+        log_info "Using default GitHub Organization: $GITHUB_ORG"
     fi
 
-    log_info "Namespace: $NAMESPACE"
-    log_info "GitHub Organization: $GITHUB_ORG"
+    echo ""
+    log_info "This script will:"
+    log_info "  1. Connect to DEV cluster (aks-ecommerce-dev)"
+    log_info "  2. Generate token from SonarQube in DEV (namespace: ecommerce-dev)"
+    log_info "  3. Create GitHub secret: SONAR_TOKEN_DEV"
+    log_info "  4. Connect to PROD cluster (aks-ecommerce-prod)"
+    log_info "  5. Generate token from SonarQube in PROD (namespace: ecommerce-prod)"
+    log_info "  6. Create GitHub secret: SONAR_TOKEN_PROD"
+    log_info "  7. Set visibility to 'all' (works for public repos)"
+    echo ""
 
-    SONAR_URL=$(get_sonarqube_url "$NAMESPACE")
-    if [ $? -ne 0 ]; then exit 1; fi
-    log_info "SonarQube URL: $SONAR_URL"
-
-    wait_for_sonarqube "$SONAR_URL"
-    if [ $? -ne 0 ]; then exit 1; fi
-
-    # AQUI ESTABA EL ERROR: Ahora TOKEN capturará solo el token limpio
-    TOKEN=$(generate_sonar_token "$SONAR_URL" "$SONAR_TOKEN_NAME")
-    if [ $? -ne 0 ]; then exit 1; fi
-
-    update_github_secret "$GITHUB_ORG" "$GITHUB_SECRET_NAME" "$TOKEN"
-    if [ $? -ne 0 ]; then
-        log_warn "Manual step required. Token: $TOKEN"
+    # Process DEV environment
+    if ! process_environment "DEV" "aks-ecommerce-dev" "ecommerce-dev" "SONAR_TOKEN_DEV" "github-actions-dev"; then
+        log_error "Failed to process DEV environment"
         exit 1
     fi
 
-    log_info "=== Setup completed successfully! ==="
-    log_info "You can now run your CI/CD pipelines."
+    echo ""
+
+    # Process PROD environment
+    if ! process_environment "PROD" "aks-ecommerce-prod" "ecommerce-prod" "SONAR_TOKEN_PROD" "github-actions-prod"; then
+        log_error "Failed to process PROD environment"
+        exit 1
+    fi
+
+    echo ""
+    log_success "=========================================="
+    log_success "All environments configured successfully!"
+    log_success "=========================================="
+    echo ""
+    log_info "GitHub organization secrets created:"
+    log_info "  ✓ SONAR_TOKEN_DEV  (for develop branch / dev environment)"
+    log_info "  ✓ SONAR_TOKEN_PROD (for main branch / prod environment)"
+    echo ""
+    log_info "You can now run your CI/CD pipelines!"
+    echo ""
+
+    # Verify secrets were created
+    log_info "Verifying secrets in GitHub..."
+    gh secret list --org "$GITHUB_ORG" | grep "SONAR_TOKEN" || true
 }
 
 main "$@"
