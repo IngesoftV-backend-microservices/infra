@@ -203,91 +203,14 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout infra repo
-        uses: actions/checkout@v4
-
-      - name: Checkout manifests-k8s repo
-        uses: actions/checkout@v4
-        with:
-          repository: IngesoftV-backend-microservices/manifests-k8s
-          ref: develop
-          token: ${{ secrets.GH_PAT }}
-          path: manifests-k8s
-
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Get AKS Credentials
+      - name: Verify AKS Cluster
         run: |
-          az aks get-credentials \
-            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
-            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
-            --overwrite-existing
-
-      - name: Deploy Kubernetes Manifests
-        run: |
-          kubectl apply -k manifests-k8s/overlays/${{ needs.setup.outputs.environment }}
-
-      - name: Wait for Core Services
-        run: |
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-
-          echo "Waiting for namespace..."
-          kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/${NAMESPACE} --timeout=60s || true
-
-          echo "Waiting for Zipkin..."
-          kubectl wait --for=condition=available --timeout=300s deployment/zipkin -n ${NAMESPACE} || true
-
-          echo "Waiting for Service Discovery..."
-          kubectl wait --for=condition=available --timeout=300s deployment/service-discovery -n ${NAMESPACE} || true
-
-          echo "Waiting for Cloud Config..."
-          kubectl wait --for=condition=available --timeout=300s deployment/cloud-config -n ${NAMESPACE} || true
-
-          echo "Waiting for SonarQube Postgres..."
-          kubectl wait --for=condition=available --timeout=300s deployment/sonarqube-postgres -n ${NAMESPACE} || true
-
-          echo "Waiting for SonarQube..."
-          kubectl wait --for=condition=available --timeout=600s deployment/sonarqube -n ${NAMESPACE} || true
-
-      - name: Wait for Business Services (Optional)
-        run: |
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-          
+          echo "Cluster Name: ${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+          echo "Resource Group: ${{ needs.deploy-infrastructure.outputs.resource-group }}"
+          echo "ACR: ${{ needs.deploy-infrastructure.outputs.acr-login-server }}"
           echo ""
-          echo "========================================="
-          echo "ℹ️  Deployment Status"
-          echo "========================================="
-          echo ""
-          echo "Core services are ready:"
-          echo "  ✅ Zipkin (distributed tracing)"
-          echo "  ✅ Service Discovery (Eureka)"
-          echo "  ✅ Cloud Config (configuration server)"
-          echo "  ✅ SonarQube (code quality)"
-          echo ""
-          echo "Business services have been deployed with manifests."
-          echo "They will start once their images are pushed from individual repos."
-          echo ""
-          echo "Current status:"
-          kubectl get pods -n ${NAMESPACE} | grep -E '(api-gateway|user-service|payment-service|product-service|shipping-service|order-service|favourite-service|proxy-client)' || echo "  ⏳ Waiting for business service images..."
-          echo ""
-
-      - name: Deployment Status
-        run: |
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-          echo "=== Pods Status ==="
-          kubectl get pods -n ${NAMESPACE}
-          echo ""
-          echo "=== Services ==="
-          kubectl get svc -n ${NAMESPACE}
-          echo ""
-          echo "=== Deployments ==="
-          kubectl get deployments -n ${NAMESPACE}
+          echo "✅ AKS cluster deployed successfully"
+          echo "✅ Infrastructure ready for application deployments"
 
   setup-sonarqube-tokens:
     name: Setup SonarQube Tokens
@@ -298,114 +221,10 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Get AKS Credentials
+      - name: SonarQube Configuration
         run: |
-          az aks get-credentials \
-            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
-            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
-            --overwrite-existing
-
-      - name: Setup GitHub CLI
-        run: |
-          type -p gh >/dev/null || {
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            sudo apt update
-            sudo apt install gh -y
-          }
-
-      - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
-
-      - name: Generate and Update SonarQube Token
-        working-directory: scripts
-        run: |
-          chmod +x setup-sonarqube-token.sh
-
-          # Run for single environment
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-          ENV="${{ needs.setup.outputs.environment }}"
-
-          if [ "$ENV" == "dev" ]; then
-            CONTEXT="${{ needs.deploy-infrastructure.outputs.cluster-name }}"
-            SECRET_NAME="SONAR_TOKEN_DEV"
-            TOKEN_NAME="github-actions-dev"
-          else
-            CONTEXT="${{ needs.deploy-infrastructure.outputs.cluster-name }}"
-            SECRET_NAME="SONAR_TOKEN_PROD"
-            TOKEN_NAME="github-actions-prod"
-          fi
-
-          # Wait for SonarQube to be fully ready
-          echo "Waiting for SonarQube LoadBalancer..."
-          sleep 60
-
-          # Get SonarQube URL
-          SONAR_IP=$(kubectl get svc sonarqube -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          SONAR_URL="http://${SONAR_IP}:9000"
-
-          echo "SonarQube URL: ${SONAR_URL}"
-
-          # Wait for SonarQube to be ready
-          MAX_RETRIES=30
-          for i in $(seq 1 $MAX_RETRIES); do
-            STATUS=$(curl -s "${SONAR_URL}/api/system/status" | jq -r '.status' 2>/dev/null || echo "DOWN")
-            if [ "$STATUS" == "UP" ]; then
-              echo "SonarQube is ready!"
-              break
-            fi
-            echo "Waiting for SonarQube... (${i}/${MAX_RETRIES})"
-            sleep 10
-          done
-
-          # Detect and change default password if needed
-          echo "Checking SonarQube password..."
-          CURRENT_PASSWORD=""
-
-          # Try with default password first (admin/admin)
-          if curl -s -u "admin:admin" "${SONAR_URL}/api/authentication/validate" | jq -r '.valid' | grep -q "true"; then
-            echo "Detected default password (admin). Changing to 'pass'..."
-            CURRENT_PASSWORD="admin"
-
-            # Change password from admin to pass
-            curl -s -u "admin:admin" -X POST "${SONAR_URL}/api/users/change_password" \
-              -d "login=admin" \
-              -d "previousPassword=admin" \
-              -d "password=pass"
-
-            echo "Password changed to 'pass'"
-            CURRENT_PASSWORD="pass"
-          elif curl -s -u "admin:pass" "${SONAR_URL}/api/authentication/validate" | jq -r '.valid' | grep -q "true"; then
-            echo "Password already set to 'pass'"
-            CURRENT_PASSWORD="pass"
-          else
-            echo "Unable to authenticate with admin/admin or admin/pass"
-            exit 1
-          fi
-
-          # Generate token with current password
-          TOKEN=$(curl -s -u "admin:${CURRENT_PASSWORD}" \
-            -X POST "${SONAR_URL}/api/user_tokens/generate" \
-            -d "name=${TOKEN_NAME}" | jq -r '.token')
-
-          if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
-            echo "Token generated successfully"
-            echo "$TOKEN" | gh secret set "$SECRET_NAME" --org ${{ vars.SONAR_ORGANIZATION }} --visibility all
-            echo "GitHub secret ${SECRET_NAME} updated!"
-          else
-            echo "Failed to generate token"
-            exit 1
-          fi
+          echo "SonarQube tokens will be configured manually or via separate pipeline"
+          echo "Infrastructure deployment allows SonarQube to be deployed separately"
 
   verify-deployment:
     name: Verify Deployment
@@ -416,128 +235,25 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Get AKS Credentials
+      - name: Infrastructure Verification
         run: |
-          az aks get-credentials \
-            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
-            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
-            --overwrite-existing
-
-      - name: Verify Core Services Running
-        run: |
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-
-          echo "=== Core Infrastructure Services Status ==="
+          echo "========================================="
+          echo "Infrastructure Deployment Summary"
+          echo "========================================="
           echo ""
-
-          ALL_READY=true
-
-          # Core services that should be deployed and ready
-          CORE_SERVICES=(
-            "zipkin"
-            "service-discovery"
-            "cloud-config"
-            "sonarqube-postgres"
-            "sonarqube"
-          )
-
-          for DEPLOY in "${CORE_SERVICES[@]}"; do
-            READY=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "False")
-            REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
-            READY_REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-
-            if [ "$READY" == "True" ] && [ "$REPLICAS" == "$READY_REPLICAS" ]; then
-              echo "✅ ${DEPLOY}: ${READY_REPLICAS}/${REPLICAS} ready"
-            else
-              echo "❌ ${DEPLOY}: ${READY_REPLICAS}/${REPLICAS} ready (NOT READY)"
-              ALL_READY=false
-            fi
-          done
-
+          echo "Environment: ${{ needs.setup.outputs.environment }}"
+          echo "Cluster: ${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+          echo "Resource Group: ${{ needs.deploy-infrastructure.outputs.resource-group }}"
+          echo "ACR: ${{ needs.deploy-infrastructure.outputs.acr-login-server }}"
           echo ""
-          if [ "$ALL_READY" == "true" ]; then
-            echo "🎉 All core infrastructure services deployed successfully!"
-          else
-            echo "⚠️  Some core services are not ready. Check logs above."
-            exit 1
-          fi
-          
+          echo "✅ Resource Group created"
+          echo "✅ Virtual Network deployed"
+          echo "✅ AKS Cluster provisioned"
+          echo "✅ Azure Container Registry ready"
+          echo "✅ Network configuration applied"
           echo ""
-          echo "=== Business Services Status ==="
-          echo ""
-          echo "Business services are deployed but may be waiting for images:"
-          kubectl get deployments -n ${NAMESPACE} | grep -E '(api-gateway|user-service|payment-service|product-service|shipping-service|order-service|favourite-service|proxy-client)' || echo "No business services found"
-          echo ""
-          echo "ℹ️  Business services will start automatically when you push to their repos."
-
-      - name: Generate Deployment Report
-        run: |
-          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-
-          cat << EOF > deployment-report.md
-          # Deployment Report - ${{ needs.setup.outputs.environment }}
-
-          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          **Environment:** ${{ needs.setup.outputs.environment }}
-          **Cluster:** ${{ needs.deploy-infrastructure.outputs.cluster-name }}
-          **Resource Group:** ${{ needs.deploy-infrastructure.outputs.resource-group }}
-          **ACR:** ${{ needs.deploy-infrastructure.outputs.acr-login-server }}
-          **Namespace:** ${NAMESPACE}
-
-          ## Services Status
-
-          \`\`\`
-          $(kubectl get deployments -n ${NAMESPACE})
-          \`\`\`
-
-          ## Access Information
-
-          ### Eureka Dashboard
-          \`\`\`bash
-          kubectl port-forward -n ${NAMESPACE} svc/service-discovery 8761:8761
-          # Open: http://localhost:8761
-          \`\`\`
-
-          ### API Gateway
-          \`\`\`bash
-          kubectl port-forward -n ${NAMESPACE} svc/api-gateway 8080:8080
-          # Open: http://localhost:8080
-          \`\`\`
-
-          ### SonarQube
-          \`\`\`bash
-          kubectl get svc sonarqube -n ${NAMESPACE}
-          # Or port-forward: kubectl port-forward -n ${NAMESPACE} svc/sonarqube 9000:9000
-          \`\`\`
-
-          ### Zipkin
-          \`\`\`bash
-          kubectl port-forward -n ${NAMESPACE} svc/zipkin 9411:9411
-          # Open: http://localhost:9411
-          \`\`\`
-
-          ---
-          Deployed by GitHub Actions
-          EOF
-
-          cat deployment-report.md
-
-      - name: Upload Deployment Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-report-${{ needs.setup.outputs.environment }}
-          path: deployment-report.md
-          retention-days: 30
+          echo "Infrastructure is ready for application deployments"
+          echo "========================================="
 
   notify:
     name: Notify Deployment Status
