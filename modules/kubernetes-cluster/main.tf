@@ -65,7 +65,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "additional" {
   })
 
   tags = merge(var.tags, {
-    "NodePoolType" = each.value.priority
+    "NodePoolType"     = each.value.priority
     "CostOptimization" = each.value.priority == "Spot" ? "enabled" : "disabled"
   })
 }

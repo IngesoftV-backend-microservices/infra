@@ -17,8 +17,8 @@ subnet_names       = ["aks-subnet", "appgw-subnet"]
 subnet_prefixes    = ["10.1.1.0/24", "10.1.2.0/24"]
 
 # Service CIDR (Must NOT overlap with VNet address space)
-service_cidr       = "10.2.0.0/16"
-dns_service_ip     = "10.2.0.10"
+service_cidr   = "10.2.0.0/16"
+dns_service_ip = "10.2.0.10"
 
 # Node pools - Production (Same topology as dev but larger VM)
 default_node_pool = {

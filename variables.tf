@@ -101,7 +101,7 @@ variable "additional_node_pools" {
     vm_size         = string
     os_disk_size_gb = number
     max_pods        = number
-    priority        = optional(string, "Regular")  # Regular or Spot
+    priority        = optional(string, "Regular") # Regular or Spot
     eviction_policy = optional(string, "Delete")  # Delete or Deallocate (only for Spot)
     spot_max_price  = optional(number, null)      # Max price for Spot instances (-1 for on-demand price)
   }))

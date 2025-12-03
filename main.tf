@@ -4,7 +4,7 @@ provider "azurerm" {
       prevent_deletion_if_contains_resources = true
     }
     key_vault {
-      purge_soft_delete_on_destroy = true
+      purge_soft_delete_on_destroy    = true
       recover_soft_deleted_key_vaults = true
     }
   }
@@ -17,7 +17,7 @@ data "azurerm_client_config" "current" {}
 # Resource Group
 module "resource_group" {
   source = "./modules/resource-group"
-  
+
   name        = var.resource_group_name
   environment = var.environment
   location    = var.location
@@ -27,7 +27,7 @@ module "resource_group" {
 # Networking
 module "networking" {
   source = "./modules/networking"
-  
+
   resource_group_name = module.resource_group.name
   location            = module.resource_group.location
   environment         = var.environment
@@ -56,21 +56,21 @@ module "acr" {
 module "kubernetes_cluster" {
   source = "./modules/kubernetes-cluster"
 
-  cluster_name            = var.cluster_name
-  environment             = var.environment
-  resource_group_name     = module.resource_group.name
-  location                = module.resource_group.location
-  dns_prefix              = var.dns_prefix
-  kubernetes_version      = var.kubernetes_version
+  cluster_name        = var.cluster_name
+  environment         = var.environment
+  resource_group_name = module.resource_group.name
+  location            = module.resource_group.location
+  dns_prefix          = var.dns_prefix
+  kubernetes_version  = var.kubernetes_version
 
   # Network configuration
-  vnet_subnet_id          = module.networking.aks_subnet_id
-  service_cidr            = var.service_cidr
-  dns_service_ip          = var.dns_service_ip
+  vnet_subnet_id = module.networking.aks_subnet_id
+  service_cidr   = var.service_cidr
+  dns_service_ip = var.dns_service_ip
 
   # Node pools
-  default_node_pool       = var.default_node_pool
-  additional_node_pools  = var.additional_node_pools
+  default_node_pool     = var.default_node_pool
+  additional_node_pools = var.additional_node_pools
 
   # Security
   rbac_enabled = var.rbac_enabled
