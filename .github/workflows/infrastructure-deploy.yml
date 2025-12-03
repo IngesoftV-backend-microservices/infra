@@ -197,7 +197,6 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'maven'
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
