@@ -1,0 +1,556 @@
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - 'infra/**'
+      - 'manifests-k8s/**'
+      - 'scripts/**'
+      - '.github/workflows/infrastructure-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  AZURE_REGION_DEV: 'East US'
+  AZURE_REGION_PROD: 'East US 2'
+
+jobs:
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.determine-env.outputs.environment }}
+      terraform-cache-key: ${{ steps.cache-info.outputs.terraform-key }}
+
+    steps:
+      - name: Determine environment
+        id: determine-env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "Deploying to: ${ENV}"
+
+      - name: Cache information
+        id: cache-info
+        run: |
+          echo "terraform-key=terraform-${{ runner.os }}-${{ hashFiles('infra/**/*.tf') }}" >> $GITHUB_OUTPUT
+
+  validate-terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    needs: setup
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: infra
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: infra
+        run: terraform validate
+
+  setup-backend:
+    name: Setup Terraform Backend
+    runs-on: ubuntu-latest
+    needs: [setup, validate-terraform]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform Backend
+        working-directory: infra/scripts
+        run: |
+          chmod +x setup-backend.sh
+          ./setup-backend.sh
+
+  deploy-infrastructure:
+    name: Deploy Infrastructure (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [setup, setup-backend]
+    environment: ${{ needs.setup.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      cluster-name: ${{ steps.terraform-output.outputs.cluster-name }}
+      resource-group: ${{ steps.terraform-output.outputs.resource-group }}
+      acr-login-server: ${{ steps.terraform-output.outputs.acr-login-server }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        working-directory: infra
+        run: |
+          terraform init \
+            -backend-config="key=ecommerce-aks/${{ needs.setup.outputs.environment }}.tfstate" \
+            -reconfigure
+
+      - name: Terraform Plan
+        working-directory: infra
+        run: |
+          terraform plan \
+            -var-file="environments/${{ needs.setup.outputs.environment }}/terraform.tfvars" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: terraform-output
+        working-directory: infra
+        run: |
+          echo "cluster-name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "resource-group=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+          echo "acr-login-server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
+
+  build-and-push-images:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Images
+        run: |
+          chmod +x scripts/build-and-push-images.sh
+          ./scripts/build-and-push-images.sh ${{ needs.setup.outputs.environment }}
+
+  deploy-to-aks:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-infrastructure, build-and-push-images]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
+            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
+            --overwrite-existing
+
+      - name: Deploy Kubernetes Manifests
+        working-directory: manifests-k8s
+        run: |
+          kubectl apply -k overlays/${{ needs.setup.outputs.environment }}
+
+      - name: Wait for Core Services
+        run: |
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+
+          echo "Waiting for namespace..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/${NAMESPACE} --timeout=60s || true
+
+          echo "Waiting for Zipkin..."
+          kubectl wait --for=condition=available --timeout=300s deployment/zipkin -n ${NAMESPACE} || true
+
+          echo "Waiting for Service Discovery..."
+          kubectl wait --for=condition=available --timeout=300s deployment/service-discovery -n ${NAMESPACE} || true
+
+          echo "Waiting for Cloud Config..."
+          kubectl wait --for=condition=available --timeout=300s deployment/cloud-config -n ${NAMESPACE} || true
+
+          echo "Waiting for SonarQube Postgres..."
+          kubectl wait --for=condition=available --timeout=300s deployment/sonarqube-postgres -n ${NAMESPACE} || true
+
+          echo "Waiting for SonarQube..."
+          kubectl wait --for=condition=available --timeout=600s deployment/sonarqube -n ${NAMESPACE} || true
+
+      - name: Wait for Business Services
+        run: |
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+          TIMEOUT=${{ needs.setup.outputs.environment == 'prod' && '600' || '300' }}
+
+          SERVICES=(
+            "api-gateway"
+            "order-service"
+            "payment-service"
+            "product-service"
+            "shipping-service"
+            "user-service"
+            "favourite-service"
+            "proxy-client"
+          )
+
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Waiting for ${SERVICE}..."
+            kubectl wait --for=condition=available --timeout=${TIMEOUT}s deployment/${SERVICE} -n ${NAMESPACE} || echo "Warning: ${SERVICE} timeout"
+          done
+
+      - name: Deployment Status
+        run: |
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+          echo "=== Pods Status ==="
+          kubectl get pods -n ${NAMESPACE}
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${NAMESPACE}
+          echo ""
+          echo "=== Deployments ==="
+          kubectl get deployments -n ${NAMESPACE}
+
+  setup-sonarqube-tokens:
+    name: Setup SonarQube Tokens
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-to-aks, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
+            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
+            --overwrite-existing
+
+      - name: Setup GitHub CLI
+        run: |
+          type -p gh >/dev/null || {
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update
+            sudo apt install gh -y
+          }
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
+
+      - name: Generate and Update SonarQube Token
+        working-directory: infra/scripts
+        run: |
+          chmod +x setup-sonarqube-token.sh
+
+          # Run for single environment
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+          ENV="${{ needs.setup.outputs.environment }}"
+
+          if [ "$ENV" == "dev" ]; then
+            CONTEXT="${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+            SECRET_NAME="SONAR_TOKEN_DEV"
+            TOKEN_NAME="github-actions-dev"
+          else
+            CONTEXT="${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+            SECRET_NAME="SONAR_TOKEN_PROD"
+            TOKEN_NAME="github-actions-prod"
+          fi
+
+          # Wait for SonarQube to be fully ready
+          echo "Waiting for SonarQube LoadBalancer..."
+          sleep 60
+
+          # Get SonarQube URL
+          SONAR_IP=$(kubectl get svc sonarqube -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          SONAR_URL="http://${SONAR_IP}:9000"
+
+          echo "SonarQube URL: ${SONAR_URL}"
+
+          # Wait for SonarQube to be ready
+          MAX_RETRIES=30
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s "${SONAR_URL}/api/system/status" | jq -r '.status' 2>/dev/null || echo "DOWN")
+            if [ "$STATUS" == "UP" ]; then
+              echo "SonarQube is ready!"
+              break
+            fi
+            echo "Waiting for SonarQube... (${i}/${MAX_RETRIES})"
+            sleep 10
+          done
+
+          # Detect and change default password if needed
+          echo "Checking SonarQube password..."
+          CURRENT_PASSWORD=""
+
+          # Try with default password first (admin/admin)
+          if curl -s -u "admin:admin" "${SONAR_URL}/api/authentication/validate" | jq -r '.valid' | grep -q "true"; then
+            echo "Detected default password (admin). Changing to 'pass'..."
+            CURRENT_PASSWORD="admin"
+
+            # Change password from admin to pass
+            curl -s -u "admin:admin" -X POST "${SONAR_URL}/api/users/change_password" \
+              -d "login=admin" \
+              -d "previousPassword=admin" \
+              -d "password=pass"
+
+            echo "Password changed to 'pass'"
+            CURRENT_PASSWORD="pass"
+          elif curl -s -u "admin:pass" "${SONAR_URL}/api/authentication/validate" | jq -r '.valid' | grep -q "true"; then
+            echo "Password already set to 'pass'"
+            CURRENT_PASSWORD="pass"
+          else
+            echo "Unable to authenticate with admin/admin or admin/pass"
+            exit 1
+          fi
+
+          # Generate token with current password
+          TOKEN=$(curl -s -u "admin:${CURRENT_PASSWORD}" \
+            -X POST "${SONAR_URL}/api/user_tokens/generate" \
+            -d "name=${TOKEN_NAME}" | jq -r '.token')
+
+          if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
+            echo "Token generated successfully"
+            echo "$TOKEN" | gh secret set "$SECRET_NAME" --org ${{ vars.SONAR_ORGANIZATION }} --visibility all
+            echo "GitHub secret ${SECRET_NAME} updated!"
+          else
+            echo "Failed to generate token"
+            exit 1
+          fi
+
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-to-aks, setup-sonarqube-tokens, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ needs.deploy-infrastructure.outputs.resource-group }} \
+            --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
+            --overwrite-existing
+
+      - name: Verify All Services Running
+        run: |
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+
+          echo "=== Final Deployment Status ==="
+          echo ""
+
+          ALL_READY=true
+
+          DEPLOYMENTS=$(kubectl get deployments -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}')
+
+          for DEPLOY in $DEPLOYMENTS; do
+            READY=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+            REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.replicas}')
+            READY_REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.readyReplicas}')
+
+            if [ "$READY" == "True" ] && [ "$REPLICAS" == "$READY_REPLICAS" ]; then
+              echo "✅ ${DEPLOY}: ${READY_REPLICAS}/${REPLICAS} ready"
+            else
+              echo "❌ ${DEPLOY}: ${READY_REPLICAS}/${REPLICAS} ready (NOT READY)"
+              ALL_READY=false
+            fi
+          done
+
+          echo ""
+          if [ "$ALL_READY" == "true" ]; then
+            echo "🎉 All services deployed successfully!"
+          else
+            echo "⚠️  Some services are not ready. Check logs above."
+          fi
+
+      - name: Generate Deployment Report
+        run: |
+          NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
+
+          cat << EOF > deployment-report.md
+          # Deployment Report - ${{ needs.setup.outputs.environment }}
+
+          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Environment:** ${{ needs.setup.outputs.environment }}
+          **Cluster:** ${{ needs.deploy-infrastructure.outputs.cluster-name }}
+          **Resource Group:** ${{ needs.deploy-infrastructure.outputs.resource-group }}
+          **ACR:** ${{ needs.deploy-infrastructure.outputs.acr-login-server }}
+          **Namespace:** ${NAMESPACE}
+
+          ## Services Status
+
+          \`\`\`
+          $(kubectl get deployments -n ${NAMESPACE})
+          \`\`\`
+
+          ## Access Information
+
+          ### Eureka Dashboard
+          \`\`\`bash
+          kubectl port-forward -n ${NAMESPACE} svc/service-discovery 8761:8761
+          # Open: http://localhost:8761
+          \`\`\`
+
+          ### API Gateway
+          \`\`\`bash
+          kubectl port-forward -n ${NAMESPACE} svc/api-gateway 8080:8080
+          # Open: http://localhost:8080
+          \`\`\`
+
+          ### SonarQube
+          \`\`\`bash
+          kubectl get svc sonarqube -n ${NAMESPACE}
+          # Or port-forward: kubectl port-forward -n ${NAMESPACE} svc/sonarqube 9000:9000
+          \`\`\`
+
+          ### Zipkin
+          \`\`\`bash
+          kubectl port-forward -n ${NAMESPACE} svc/zipkin 9411:9411
+          # Open: http://localhost:9411
+          \`\`\`
+
+          ---
+          Deployed by GitHub Actions
+          EOF
+
+          cat deployment-report.md
+
+      - name: Upload Deployment Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-report-${{ needs.setup.outputs.environment }}
+          path: deployment-report.md
+          retention-days: 30
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [setup, verify-deployment]
+    if: always()
+
+    steps:
+      - name: Send Slack Notification
+        if: vars.SLACK_WEBHOOK_URL != ''
+        run: |
+          STATUS="${{ needs.verify-deployment.result }}"
+          COLOR="good"
+          if [ "$STATUS" != "success" ]; then
+            COLOR="danger"
+          fi
+
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$COLOR"'",
+                "title": "Infrastructure Deployment - ${{ needs.setup.outputs.environment }}",
+                "fields": [
+                  {
+                    "title": "Status",
+                    "value": "'"$STATUS"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Environment",
+                    "value": "${{ needs.setup.outputs.environment }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "${{ github.ref_name }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Triggered by",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  }
+                ],
+                "footer": "GitHub Actions",
+                "ts": '"$(date +%s)"'
+              }]
+            }' || true
