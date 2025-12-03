@@ -15,8 +15,8 @@ This pipeline automates the complete deployment of Azure infrastructure (AKS, AC
 1. **Validate Terraform** - Executes format check and configuration validation
 2. **Setup Backend** - Creates Azure Storage Account for Terraform state (idempotent)
 3. **Deploy Infrastructure** - Applies Terraform configuration (AKS, ACR, VNet)
-4. **Build & Push Images** - Builds 10 microservices and pushes to ACR
-5. **Deploy to AKS** - Applies Kubernetes manifests and performs health checks
+4. **Build & Push Images** - Clones all microservice repos, builds Docker images and pushes to ACR
+5. **Deploy to AKS** - Clones manifests-k8s repo, applies Kubernetes manifests and performs health checks
 6. **Setup SonarQube Tokens** - Generates tokens and updates GitHub Secrets
 7. **Verify Deployment** - Validates final state and generates report
 8. **Notify** - Sends Slack notification with deployment status
@@ -39,6 +39,13 @@ The following environments must be configured in Settings > Environments:
 The pipeline expects the following Azure resources (created automatically):
 - Service Principal configured for OIDC authentication
 - Federated Credentials (configured via `federate_all.sh`)
+
+### Required Repositories
+The pipeline clones the following repositories during execution:
+- **manifests-k8s** - Kubernetes manifests and Kustomize configurations
+- **10 microservices** - cloud-config, service-discovery, api-gateway, order-service, payment-service, product-service, shipping-service, user-service, favourite-service, proxy-client
+
+All repositories must be accessible with the provided GH_PAT token.
 
 ## Manual Deployment
 
