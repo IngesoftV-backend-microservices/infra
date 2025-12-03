@@ -60,18 +60,6 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-# Check if git is installed
-if ! command -v git &> /dev/null; then
-    print_error "git is not installed. Please install it first."
-    exit 1
-fi
-
-# Check if Maven is installed
-if ! command -v mvn &> /dev/null; then
-    print_error "Maven is not installed. Please install it first."
-    exit 1
-fi
-
 # Check if logged in to Azure
 print_info "Checking Azure authentication..."
 if ! az account show &> /dev/null; then
@@ -84,7 +72,7 @@ print_info "Logging in to ACR: $ACR_NAME..."
 az acr login --name "$ACR_NAME" || {
     print_error "Failed to login to ACR. Make sure the ACR exists and you have permissions."
     exit 1
-}
+fi
 
 # Array of CORE services to build
 # Business services (api-gateway, user-service, etc.) are built from their own repos
@@ -104,6 +92,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Clone parent monorepo that contains all services
+PARENT_REPO="IngesoftV-backend-microservices"
+print_info "Cloning parent monorepo: $GITHUB_ORG/$PARENT_REPO..."
+if ! git clone --depth 1 "https://github.com/$GITHUB_ORG/$PARENT_REPO.git" "$TEMP_DIR/monorepo" 2>/dev/null; then
+    print_error "Failed to clone parent monorepo"
+    print_error "Make sure you have access to https://github.com/$GITHUB_ORG/$PARENT_REPO"
+    exit 1
+fi
+
 # Build and push each service
 TOTAL_SERVICES=${#SERVICES[@]}
 CURRENT=0
@@ -112,13 +109,11 @@ for SERVICE in "${SERVICES[@]}"; do
     CURRENT=$((CURRENT + 1))
     print_info "[$CURRENT/$TOTAL_SERVICES] Processing $SERVICE..."
 
-    SERVICE_DIR="$TEMP_DIR/$SERVICE"
+    SERVICE_DIR="$TEMP_DIR/monorepo/$SERVICE"
 
-    # Clone repository
-    print_info "Cloning repository: $GITHUB_ORG/$SERVICE..."
-    if ! git clone --depth 1 "https://github.com/$GITHUB_ORG/$SERVICE.git" "$SERVICE_DIR" 2>/dev/null; then
-        print_error "Failed to clone $SERVICE repository"
-        print_error "Make sure you have access to https://github.com/$GITHUB_ORG/$SERVICE"
+    # Check if service directory exists
+    if [ ! -d "$SERVICE_DIR" ]; then
+        print_error "Service directory not found: $SERVICE_DIR"
         exit 1
     fi
 
@@ -128,19 +123,7 @@ for SERVICE in "${SERVICES[@]}"; do
         continue
     fi
 
-    # Check if pom.xml exists (Maven project)
-    if [ -f "$SERVICE_DIR/pom.xml" ]; then
-        print_info "Compiling Maven project..."
-        cd "$SERVICE_DIR"
-        mvn clean package -DskipTests || {
-            print_error "Failed to compile $SERVICE with Maven"
-            exit 1
-        }
-        cd - > /dev/null
-        print_info "Maven build successful"
-    fi
-
-    # Build image
+    # Build image (Dockerfile handles compilation with multi-stage build)
     IMAGE_NAME="$ACR_LOGIN_SERVER/$SERVICE:$IMAGE_TAG"
     print_info "Building Docker image: $IMAGE_NAME"
 
