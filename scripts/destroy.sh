@@ -45,7 +45,7 @@ echo -e "${GREEN}✅ Azure authentication OK${NC}"
 
 # Show what will be destroyed
 echo -e "${BLUE}📋 Showing what will be destroyed...${NC}"
-terraform init -upgrade > /dev/null 2>&1
+terraform init -backend-config="key=ecommerce-aks/${ENV}.tfstate" -reconfigure -upgrade > /dev/null 2>&1
 terraform plan -destroy -var-file="$TFVARS"
 
 echo ""

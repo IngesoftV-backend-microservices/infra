@@ -1,13 +1,3 @@
-variable "cluster_name" {
-  description = "Kubernetes cluster name"
-  type        = string
-}
-
-variable "environment" {
-  description = "Environment name"
-  type        = string
-}
-
 variable "resource_group_name" {
   description = "Resource group name"
   type        = string
@@ -18,18 +8,18 @@ variable "location" {
   type        = string
 }
 
+variable "cluster_name" {
+  description = "AKS cluster name"
+  type        = string
+}
+
 variable "dns_prefix" {
-  description = "DNS prefix for Kubernetes cluster"
+  description = "DNS prefix"
   type        = string
 }
 
 variable "kubernetes_version" {
   description = "Kubernetes version"
-  type        = string
-}
-
-variable "vnet_subnet_id" {
-  description = "Subnet ID for AKS nodes"
   type        = string
 }
 
@@ -59,15 +49,36 @@ variable "additional_node_pools" {
   default = {}
 }
 
+variable "vnet_subnet_id" {
+  description = "Subnet ID for the default node pool"
+  type        = string
+}
+
 variable "rbac_enabled" {
-  description = "Enable Kubernetes RBAC"
+  description = "Enable RBAC"
   type        = bool
   default     = true
 }
 
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
 variable "tags" {
-  description = "Tags to apply"
+  description = "Tags"
   type        = map(string)
   default     = {}
 }
 
+variable "service_cidr" {
+  description = "CIDR for Kubernetes services"
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "dns_service_ip" {
+  description = "IP address for DNS service (must be within service_cidr)"
+  type        = string
+  default     = "10.1.0.10"
+}

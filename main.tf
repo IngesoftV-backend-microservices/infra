@@ -65,6 +65,8 @@ module "kubernetes_cluster" {
 
   # Network configuration
   vnet_subnet_id          = module.networking.aks_subnet_id
+  service_cidr            = var.service_cidr
+  dns_service_ip          = var.dns_service_ip
 
   # Node pools
   default_node_pool       = var.default_node_pool

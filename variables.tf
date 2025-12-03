@@ -146,3 +146,14 @@ variable "tags" {
   }
 }
 
+variable "service_cidr" {
+  description = "CIDR for Kubernetes services (must not overlap with VNet)"
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "dns_service_ip" {
+  description = "IP address for DNS service (must be within service_cidr)"
+  type        = string
+  default     = "10.1.0.10"
+}
