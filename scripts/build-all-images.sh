@@ -66,6 +66,12 @@ if ! command -v git &> /dev/null; then
     exit 1
 fi
 
+# Check if Maven is installed
+if ! command -v mvn &> /dev/null; then
+    print_error "Maven is not installed. Please install it first."
+    exit 1
+fi
+
 # Check if logged in to Azure
 print_info "Checking Azure authentication..."
 if ! az account show &> /dev/null; then
@@ -122,9 +128,21 @@ for SERVICE in "${SERVICES[@]}"; do
         continue
     fi
 
+    # Check if pom.xml exists (Maven project)
+    if [ -f "$SERVICE_DIR/pom.xml" ]; then
+        print_info "Compiling Maven project..."
+        cd "$SERVICE_DIR"
+        mvn clean package -DskipTests || {
+            print_error "Failed to compile $SERVICE with Maven"
+            exit 1
+        }
+        cd - > /dev/null
+        print_info "Maven build successful"
+    fi
+
     # Build image
     IMAGE_NAME="$ACR_LOGIN_SERVER/$SERVICE:$IMAGE_TAG"
-    print_info "Building: $IMAGE_NAME"
+    print_info "Building Docker image: $IMAGE_NAME"
 
     docker build -t "$IMAGE_NAME" "$SERVICE_DIR" || {
         print_error "Failed to build $SERVICE"
