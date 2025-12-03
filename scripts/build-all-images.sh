@@ -72,7 +72,7 @@ print_info "Logging in to ACR: $ACR_NAME..."
 az acr login --name "$ACR_NAME" || {
     print_error "Failed to login to ACR. Make sure the ACR exists and you have permissions."
     exit 1
-fi
+}
 
 # Array of CORE services to build
 # Business services (api-gateway, user-service, etc.) are built from their own repos
