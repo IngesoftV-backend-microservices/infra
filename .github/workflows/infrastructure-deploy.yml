@@ -7,7 +7,6 @@ on:
       - main
     paths:
       - 'infra/**'
-      - 'manifests-k8s/**'
       - 'scripts/**'
       - '.github/workflows/infrastructure-deploy.yml'
   workflow_dispatch:
@@ -159,8 +158,8 @@ jobs:
           echo "resource-group=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
           echo "acr-login-server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
 
-  build-and-push-images:
-    name: Build & Push Docker Images
+  build-core-images:
+    name: Build & Push Core Service Images
     runs-on: ubuntu-latest
     needs: [setup, deploy-infrastructure]
     permissions:
@@ -170,6 +169,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -181,22 +184,32 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and Push Images
+      - name: Build and Push Core Images
         run: |
-          chmod +x scripts/build-and-push-images.sh
-          ./scripts/build-and-push-images.sh ${{ needs.setup.outputs.environment }}
-
+          chmod +x scripts/build-all-images.sh
+          echo "Building CORE services only (cloud-config, service-discovery)"
+          echo "Business services will be built from their individual repos"
+          ./scripts/build-all-images.sh ${{ needs.setup.outputs.environment }} ${{ vars.SONAR_ORGANIZATION }}
   deploy-to-aks:
     name: Deploy to AKS
     runs-on: ubuntu-latest
-    needs: [setup, deploy-infrastructure, build-and-push-images]
+    needs: [setup, deploy-infrastructure, build-core-images]
     permissions:
       id-token: write
       contents: read
 
     steps:
-      - name: Checkout code
+      - name: Checkout infra repo
         uses: actions/checkout@v4
+
+      - name: Checkout manifests-k8s repo
+        uses: actions/checkout@v4
+        with:
+          repository: IngesoftV-backend-microservices/manifests-k8s
+          ref: develop
+          token: ${{ secrets.GH_PAT }}
+          path: manifests-k8s
+
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -213,9 +226,8 @@ jobs:
             --overwrite-existing
 
       - name: Deploy Kubernetes Manifests
-        working-directory: manifests-k8s
         run: |
-          kubectl apply -k overlays/${{ needs.setup.outputs.environment }}
+          kubectl apply -k manifests-k8s/overlays/${{ needs.setup.outputs.environment }}
 
       - name: Wait for Core Services
         run: |
@@ -239,26 +251,27 @@ jobs:
           echo "Waiting for SonarQube..."
           kubectl wait --for=condition=available --timeout=600s deployment/sonarqube -n ${NAMESPACE} || true
 
-      - name: Wait for Business Services
+      - name: Wait for Business Services (Optional)
         run: |
           NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
-          TIMEOUT=${{ needs.setup.outputs.environment == 'prod' && '600' || '300' }}
-
-          SERVICES=(
-            "api-gateway"
-            "order-service"
-            "payment-service"
-            "product-service"
-            "shipping-service"
-            "user-service"
-            "favourite-service"
-            "proxy-client"
-          )
-
-          for SERVICE in "${SERVICES[@]}"; do
-            echo "Waiting for ${SERVICE}..."
-            kubectl wait --for=condition=available --timeout=${TIMEOUT}s deployment/${SERVICE} -n ${NAMESPACE} || echo "Warning: ${SERVICE} timeout"
-          done
+          
+          echo ""
+          echo "========================================="
+          echo "ℹ️  Deployment Status"
+          echo "========================================="
+          echo ""
+          echo "Core services are ready:"
+          echo "  ✅ Zipkin (distributed tracing)"
+          echo "  ✅ Service Discovery (Eureka)"
+          echo "  ✅ Cloud Config (configuration server)"
+          echo "  ✅ SonarQube (code quality)"
+          echo ""
+          echo "Business services have been deployed with manifests."
+          echo "They will start once their images are pushed from individual repos."
+          echo ""
+          echo "Current status:"
+          kubectl get pods -n ${NAMESPACE} | grep -E '(api-gateway|user-service|payment-service|product-service|shipping-service|order-service|favourite-service|proxy-client)' || echo "  ⏳ Waiting for business service images..."
+          echo ""
 
       - name: Deployment Status
         run: |
@@ -416,21 +429,28 @@ jobs:
             --name ${{ needs.deploy-infrastructure.outputs.cluster-name }} \
             --overwrite-existing
 
-      - name: Verify All Services Running
+      - name: Verify Core Services Running
         run: |
           NAMESPACE="ecommerce-${{ needs.setup.outputs.environment }}"
 
-          echo "=== Final Deployment Status ==="
+          echo "=== Core Infrastructure Services Status ==="
           echo ""
 
           ALL_READY=true
 
-          DEPLOYMENTS=$(kubectl get deployments -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}')
+          # Core services that should be deployed and ready
+          CORE_SERVICES=(
+            "zipkin"
+            "service-discovery"
+            "cloud-config"
+            "sonarqube-postgres"
+            "sonarqube"
+          )
 
-          for DEPLOY in $DEPLOYMENTS; do
-            READY=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
-            REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.replicas}')
-            READY_REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.readyReplicas}')
+          for DEPLOY in "${CORE_SERVICES[@]}"; do
+            READY=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "False")
+            REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
+            READY_REPLICAS=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
 
             if [ "$READY" == "True" ] && [ "$REPLICAS" == "$READY_REPLICAS" ]; then
               echo "✅ ${DEPLOY}: ${READY_REPLICAS}/${REPLICAS} ready"
@@ -442,10 +462,19 @@ jobs:
 
           echo ""
           if [ "$ALL_READY" == "true" ]; then
-            echo "🎉 All services deployed successfully!"
+            echo "🎉 All core infrastructure services deployed successfully!"
           else
-            echo "⚠️  Some services are not ready. Check logs above."
+            echo "⚠️  Some core services are not ready. Check logs above."
+            exit 1
           fi
+          
+          echo ""
+          echo "=== Business Services Status ==="
+          echo ""
+          echo "Business services are deployed but may be waiting for images:"
+          kubectl get deployments -n ${NAMESPACE} | grep -E '(api-gateway|user-service|payment-service|product-service|shipping-service|order-service|favourite-service|proxy-client)' || echo "No business services found"
+          echo ""
+          echo "ℹ️  Business services will start automatically when you push to their repos."
 
       - name: Generate Deployment Report
         run: |
