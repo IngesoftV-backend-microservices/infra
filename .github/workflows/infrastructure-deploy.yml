@@ -6,7 +6,9 @@ on:
       - develop
       - main
     paths:
-      - 'infra/**'
+      - '*.tf'
+      - 'modules/**'
+      - 'environments/**'
       - 'scripts/**'
       - '.github/workflows/infrastructure-deploy.yml'
   workflow_dispatch:
@@ -49,7 +51,7 @@ jobs:
       - name: Cache information
         id: cache-info
         run: |
-          echo "terraform-key=terraform-${{ runner.os }}-${{ hashFiles('infra/**/*.tf') }}" >> $GITHUB_OUTPUT
+          echo "terraform-key=terraform-${{ runner.os }}-${{ hashFiles('**/*.tf') }}" >> $GITHUB_OUTPUT
 
   validate-terraform:
     name: Validate Terraform
@@ -97,7 +99,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform Backend
-/scripts
+        working-directory: scripts
         run: |
           chmod +x setup-backend.sh
           ./setup-backend.sh
@@ -152,7 +154,6 @@ jobs:
 
       - name: Get Terraform Outputs
         id: terraform-output
-        working-directory: infra
         run: |
           echo "cluster-name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
           echo "resource-group=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
@@ -324,7 +325,7 @@ jobs:
         run: echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
 
       - name: Generate and Update SonarQube Token
-        working-directory: infra/scripts
+        working-directory: scripts
         run: |
           chmod +x setup-sonarqube-token.sh
 
