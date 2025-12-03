@@ -44,7 +44,7 @@ echo -e "${GREEN}✅ Azure authentication OK${NC}"
 
 # Initialize Terraform
 echo -e "${BLUE}📦 Initializing Terraform...${NC}"
-terraform init
+terraform init -backend-config="key=ecommerce-aks/${ENV}.tfstate" -reconfigure
 
 # Validate configuration
 echo -e "${BLUE}✅ Validating Terraform configuration...${NC}"

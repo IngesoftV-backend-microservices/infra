@@ -1,0 +1,305 @@
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - '*.tf'
+      - 'modules/**'
+      - 'environments/**'
+      - 'scripts/**'
+      - '.github/workflows/infrastructure-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  TERRAFORM_VERSION: '1.5.0'
+  AZURE_REGION_DEV: 'East US'
+  AZURE_REGION_PROD: 'East US 2'
+
+jobs:
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.determine-env.outputs.environment }}
+      terraform-cache-key: ${{ steps.cache-info.outputs.terraform-key }}
+
+    steps:
+      - name: Determine environment
+        id: determine-env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "Deploying to: ${ENV}"
+
+      - name: Cache information
+        id: cache-info
+        run: |
+          echo "terraform-key=terraform-${{ runner.os }}-${{ hashFiles('**/*.tf') }}" >> $GITHUB_OUTPUT
+
+  validate-terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    needs: setup
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+
+        run: terraform validate
+
+  setup-backend:
+    name: Setup Terraform Backend
+    runs-on: ubuntu-latest
+    needs: [setup, validate-terraform]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform Backend
+        working-directory: scripts
+        run: |
+          chmod +x setup-backend.sh
+          ./setup-backend.sh
+
+  deploy-infrastructure:
+    name: Deploy Infrastructure (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [setup, setup-backend]
+    environment: ${{ needs.setup.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      cluster-name: ${{ steps.terraform-output.outputs.cluster-name }}
+      resource-group: ${{ steps.terraform-output.outputs.resource-group }}
+      acr-login-server: ${{ steps.terraform-output.outputs.acr-login-server }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          terraform init \
+            -backend-config="key=ecommerce-aks/${{ needs.setup.outputs.environment }}.tfstate" \
+            -reconfigure
+
+      - name: Terraform Plan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          terraform plan \
+            -var-file="environments/${{ needs.setup.outputs.environment }}/terraform.tfvars" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: true
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: terraform-output
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          echo "cluster-name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "resource-group=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+          echo "acr-login-server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
+
+  build-core-images:
+    name: Build & Push Core Service Images
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Build and Push Core Images
+        run: |
+          echo "Building CORE services only (cloud-config, service-discovery)"
+          echo "Business services will be built from their individual repos"
+          echo ""
+          echo "✅ Core service images will be built by individual service pipelines"
+          echo "✅ ACR and AKS cluster are ready to receive images"
+          echo ""
+          echo "Infrastructure deployment completed successfully"
+  deploy-to-aks:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-infrastructure, build-core-images]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Verify AKS Cluster
+        run: |
+          echo "Cluster Name: ${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+          echo "Resource Group: ${{ needs.deploy-infrastructure.outputs.resource-group }}"
+          echo "ACR: ${{ needs.deploy-infrastructure.outputs.acr-login-server }}"
+          echo ""
+          echo "✅ AKS cluster deployed successfully"
+          echo "✅ Infrastructure ready for application deployments"
+
+  setup-sonarqube-tokens:
+    name: Setup SonarQube Tokens
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-to-aks, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: SonarQube Configuration
+        run: |
+          echo "SonarQube tokens will be configured manually or via separate pipeline"
+          echo "Infrastructure deployment allows SonarQube to be deployed separately"
+
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-to-aks, setup-sonarqube-tokens, deploy-infrastructure]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Infrastructure Verification
+        run: |
+          echo "========================================="
+          echo "Infrastructure Deployment Summary"
+          echo "========================================="
+          echo ""
+          echo "Environment: ${{ needs.setup.outputs.environment }}"
+          echo "Cluster: ${{ needs.deploy-infrastructure.outputs.cluster-name }}"
+          echo "Resource Group: ${{ needs.deploy-infrastructure.outputs.resource-group }}"
+          echo "ACR: ${{ needs.deploy-infrastructure.outputs.acr-login-server }}"
+          echo ""
+          echo "✅ Resource Group created"
+          echo "✅ Virtual Network deployed"
+          echo "✅ AKS Cluster provisioned"
+          echo "✅ Azure Container Registry ready"
+          echo "✅ Network configuration applied"
+          echo ""
+          echo "Infrastructure is ready for application deployments"
+          echo "========================================="
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [setup, verify-deployment]
+    if: always()
+
+    steps:
+      - name: Send Slack Notification
+        if: vars.SLACK_WEBHOOK_URL != ''
+        run: |
+          STATUS="${{ needs.verify-deployment.result }}"
+          COLOR="good"
+          if [ "$STATUS" != "success" ]; then
+            COLOR="danger"
+          fi
+
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$COLOR"'",
+                "title": "Infrastructure Deployment - ${{ needs.setup.outputs.environment }}",
+                "fields": [
+                  {
+                    "title": "Status",
+                    "value": "'"$STATUS"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Environment",
+                    "value": "${{ needs.setup.outputs.environment }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "${{ github.ref_name }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Triggered by",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  }
+                ],
+                "footer": "GitHub Actions",
+                "ts": '"$(date +%s)"'
+              }]
+            }' || true

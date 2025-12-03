@@ -10,7 +10,7 @@ variable "environment" {
 variable "location" {
   description = "Azure region for resources"
   type        = string
-  default     = "East US"
+  default     = "Canada Central"
 }
 
 variable "resource_group_name" {
@@ -101,6 +101,9 @@ variable "additional_node_pools" {
     vm_size         = string
     os_disk_size_gb = number
     max_pods        = number
+    priority        = optional(string, "Regular") # Regular or Spot
+    eviction_policy = optional(string, "Delete")  # Delete or Deallocate (only for Spot)
+    spot_max_price  = optional(number, null)      # Max price for Spot instances (-1 for on-demand price)
   }))
   default = {}
 }
@@ -111,6 +114,27 @@ variable "rbac_enabled" {
   default     = true
 }
 
+variable "acr_name" {
+  description = "Base name for ACR (alphanumeric only, will have environment suffix)"
+  type        = string
+  default     = "acrvingesofttaller2"
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9]+$", var.acr_name))
+    error_message = "ACR name must contain only alphanumeric characters."
+  }
+}
+
+variable "acr_sku" {
+  description = "SKU tier for ACR (Basic, Standard, Premium)"
+  type        = string
+  default     = "Basic"
+}
+
+variable "acr_admin_enabled" {
+  description = "Enable admin user for ACR"
+  type        = bool
+  default     = false
+}
 
 variable "tags" {
   description = "Tags to apply to resources"
@@ -122,3 +146,14 @@ variable "tags" {
   }
 }
 
+variable "service_cidr" {
+  description = "CIDR for Kubernetes services (must not overlap with VNet)"
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "dns_service_ip" {
+  description = "IP address for DNS service (must be within service_cidr)"
+  type        = string
+  default     = "10.1.0.10"
+}

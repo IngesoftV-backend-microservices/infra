@@ -1,6 +1,6 @@
 # Development Environment Configuration
 environment = "dev"
-location    = "East US"
+location    = "Canada Central"
 
 # Resource naming
 resource_group_name = "rg-ecommerce-microservices"
@@ -20,14 +20,25 @@ subnet_prefixes    = ["10.0.1.0/24", "10.0.2.0/24"]
 default_node_pool = {
   name            = "system"
   node_count      = 2
-  vm_size         = "Standard_B2s"
+  vm_size         = "Standard_B2ms"
   os_disk_size_gb = 30
   type            = "VirtualMachineScaleSets"
   max_pods        = 30
 }
 
-# Additional node pools for specific workloads (optional for dev)
-additional_node_pools = {}
+# Additional node pools for specific workloads
+# Spot instances para cargas de trabajo tolerantes a interrupciones (ahorro ~70%)
+additional_node_pools = {
+  spot = {
+    node_count      = 1
+    vm_size         = "Standard_B2s"
+    os_disk_size_gb = 30
+    max_pods        = 30
+    priority        = "Spot"
+    eviction_policy = "Delete"
+    spot_max_price  = -1  # -1 means on-demand price (recommended)
+  }
+}
 
 # Security
 rbac_enabled = true

@@ -25,8 +25,8 @@ resource "azurerm_kubernetes_cluster" "main" {
   network_profile {
     network_plugin = "azure"
     network_policy = "azure"
-    service_cidr   = "10.1.0.0/16"
-    dns_service_ip = "10.1.0.10"
+    service_cidr   = var.service_cidr
+    dns_service_ip = var.dns_service_ip
   }
 
   tags = merge(var.tags, {
@@ -53,6 +53,20 @@ resource "azurerm_kubernetes_cluster_node_pool" "additional" {
   os_disk_size_gb       = each.value.os_disk_size_gb
   max_pods              = each.value.max_pods
 
-  tags = var.tags
+  # Spot instance configuration
+  priority        = each.value.priority
+  eviction_policy = each.value.priority == "Spot" ? each.value.eviction_policy : null
+  spot_max_price  = each.value.priority == "Spot" && each.value.spot_max_price != null ? each.value.spot_max_price : null
+
+  # Node labels for cost tracking
+  node_labels = merge(var.tags, {
+    "kubernetes.azure.com/scalesetpriority" = each.value.priority
+    "cost-optimization"                     = each.value.priority == "Spot" ? "spot-instance" : "regular-instance"
+  })
+
+  tags = merge(var.tags, {
+    "NodePoolType"     = each.value.priority
+    "CostOptimization" = each.value.priority == "Spot" ? "enabled" : "disabled"
+  })
 }
 
